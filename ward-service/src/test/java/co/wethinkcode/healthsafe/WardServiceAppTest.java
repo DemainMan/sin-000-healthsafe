@@ -23,6 +23,7 @@ class WardServiceAppTest {
     private HttpServer ingestion;
     private Javalin app;
     private HttpClient client;
+    private StaffingUpdateStore updateStore;
 
     @BeforeEach
     void start() throws Exception {
@@ -45,7 +46,8 @@ class WardServiceAppTest {
                 "http://localhost:" + ingestion.getAddress().getPort());
         WardStore store = new WardStore();
         store.replaceAll(ingestionClient.fetchWards());
-        app = WardServiceApp.createApp(store, ingestionClient).start(0);
+        updateStore = new StaffingUpdateStore();
+        app = WardServiceApp.createApp(store, ingestionClient, updateStore).start(0);
         client = HttpClient.newHttpClient();
     }
 
@@ -82,6 +84,22 @@ class WardServiceAppTest {
         HttpResponse<String> refreshed = sendPost("/wards/refresh");
         assertEquals(200, refreshed.statusCode());
         assertTrue(refreshed.body().contains("\"wards\":2"));
+    }
+
+    @Test
+    void exposesLatestStaffingUpdates() throws Exception {
+        updateStore.save(new StaffingEvent(
+                "SCHEDULE_UPDATED", "w-01", "East Wing", "Cardiology", 4, 5,
+                List.of("DOC-001"), 12, "2026-01-01T00:00:00Z"));
+
+        HttpResponse<String> all = get("/staffing-updates");
+        assertEquals(200, all.statusCode());
+        assertTrue(all.body().contains("\"wardId\":\"w-01\""));
+
+        HttpResponse<String> one = get("/staffing-updates/W-01");
+        assertEquals(200, one.statusCode());
+        assertTrue(one.body().contains("\"requiredDoctors\":5"));
+        assertEquals(404, get("/staffing-updates/W-99").statusCode());
     }
 
     @Test

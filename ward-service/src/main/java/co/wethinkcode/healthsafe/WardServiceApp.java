@@ -10,6 +10,7 @@ public class WardServiceApp {
 
     public static void main(String[] args) {
         String ingestionUrl = envOr("INGESTION_URL", DEFAULT_INGESTION_URL);
+        String brokerUrl = envOr("HEALTHSAFE_BROKER_URL", "tcp://localhost:61616");
         IngestionClient client = new IngestionClient(ingestionUrl);
         WardStore store = new WardStore();
         try {
@@ -17,10 +18,24 @@ public class WardServiceApp {
         } catch (IngestionUnavailableException ex) {
             System.err.println("Could not load wards at startup: " + ex.getMessage());
         }
-        createApp(store, client).start(7031);
+
+        StaffingUpdateStore updateStore = new StaffingUpdateStore();
+        StaffingEventSubscriber subscriber = new StaffingEventSubscriber(brokerUrl, updateStore);
+        try {
+            subscriber.start();
+        } catch (Exception ex) {
+            System.err.println("Could not subscribe to staffing updates: " + ex.getMessage());
+        }
+
+        createApp(store, client, updateStore).start(7031);
     }
 
     public static Javalin createApp(WardStore store, IngestionClient client) {
+        return createApp(store, client, new StaffingUpdateStore());
+    }
+
+    public static Javalin createApp(WardStore store, IngestionClient client,
+                                    StaffingUpdateStore updateStore) {
         Javalin app = Javalin.create();
 
         app.get("/health", ctx -> ctx.result("OK"));
@@ -37,6 +52,10 @@ public class WardServiceApp {
                 ctx.status(503).json(Map.of("error", "ingestion-service unavailable"));
             }
         });
+        app.get("/staffing-updates", ctx -> ctx.json(updateStore.all()));
+        app.get("/staffing-updates/{wardId}", ctx -> updateStore.find(ctx.pathParam("wardId"))
+                .ifPresentOrElse(ctx::json,
+                        () -> ctx.status(404).json(Map.of("error", "no staffing update for that ward"))));
 
         return app;
     }

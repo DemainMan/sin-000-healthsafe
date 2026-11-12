@@ -6,13 +6,16 @@ public final class StaffingService {
     private final AlertLevelClient alertLevelClient;
     private final ScheduleCalculator calculator;
     private final ScheduleStore store;
+    private final SchedulePublisher publisher;
 
     public StaffingService(WardClient wardClient, AlertLevelClient alertLevelClient,
-                           ScheduleCalculator calculator, ScheduleStore store) {
+                           ScheduleCalculator calculator, ScheduleStore store,
+                           SchedulePublisher publisher) {
         this.wardClient = wardClient;
         this.alertLevelClient = alertLevelClient;
         this.calculator = calculator;
         this.store = store;
+        this.publisher = publisher;
     }
 
     public Schedule calculate(String wardId) {
@@ -24,6 +27,7 @@ public final class StaffingService {
     public Schedule store(String wardId) {
         Schedule schedule = calculate(wardId);
         store.save(schedule);
+        publisher.publish(schedule);
         return schedule;
     }
 

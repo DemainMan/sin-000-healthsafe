@@ -18,7 +18,8 @@ public class StaffingServiceApp {
                 new WardClient(envOr("WARD_SERVICE_URL", DEFAULT_WARD_URL)),
                 new AlertLevelClient(envOr("ALERT_LEVEL_SERVICE_URL", DEFAULT_ALERT_URL)),
                 new ScheduleCalculator(),
-                new ScheduleStore());
+                new ScheduleStore(),
+                new StaffingEventPublisher(envOr("HEALTHSAFE_BROKER_URL", "tcp://localhost:61616")));
         createApp(service).start(7033);
     }
 

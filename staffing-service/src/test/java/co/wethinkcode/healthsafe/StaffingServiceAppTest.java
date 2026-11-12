@@ -57,7 +57,9 @@ class StaffingServiceAppTest {
                 new WardClient(base),
                 new AlertLevelClient(base),
                 new ScheduleCalculator(),
-                new ScheduleStore());
+                new ScheduleStore(),
+                schedule -> {
+                });
         app = StaffingServiceApp.createApp(service).start(0);
         client = HttpClient.newHttpClient();
     }
