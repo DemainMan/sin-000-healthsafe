@@ -2,179 +2,183 @@
 
 ## Overview
 
-Hospital ward status and emergency staffing schedules.
+HealthSafe is a small set of independently runnable Java services that clean a legacy
+ward export, expose ward and emergency-status data over HTTP, compute on-call staffing
+schedules, and deliver critical equipment alerts through ActiveMQ.
 
-Domain entities: wards, wings, specialist departments.
-
-Every class in this repo lives in a single flat package, `co.wethinkcode.healthsafe`. HealthSafe is built
-as a small set of independent services, following a growth path from simple data
-cleanup through synchronous REST calls to asynchronous MQ decoupling and alerting:
-
-1. clean a messy legacy CSV export (`wards-outdated.csv`) — handled by **IngestionServiceApp**
-2. serve it up and act on it, via three REST services calling each other directly
-   over HTTP
-3. decouple the relevant services with an ActiveMQ topic (`staffing-events-topic`) instead of
-   direct calls — shared broker setup lives in [`common/`](common)
-4. raise the alarm on failure — handled by **EquipmentAlertServiceApp**
+Every class lives in the flat package `co.wethinkcode.healthsafe`. Each service is an
+independent Maven project with its own pom and shaded executable jar; there is no parent
+pom and no shared artifact between services.
 
 | Service | Folder | Port | Role |
 |---|---|---|---|
 | IngestionServiceApp | [`ingestion-service/`](ingestion-service) | 7030 | Parses and cleans `wards-outdated.csv` |
-| WardServiceApp | [`ward-service/`](ward-service) | 7031 | Provides lists of wards and departments. |
-| AlertLevelServiceApp | [`alert-level-service/`](alert-level-service) | 7032 | Tracks the hospital Emergency Status (0-8, 8 = full Code Blue). |
-| StaffingServiceApp | [`staffing-service/`](staffing-service) | 7033 | Provides on-call schedules for doctors based on ward and status. |
-| EquipmentAlertServiceApp | [`equipment-alert-service/`](equipment-alert-service) | 7034 | uses a Queue to guarantee delivery of critical medical equipment failure alerts. |
+| WardServiceApp | [`ward-service/`](ward-service) | 7031 | Serves wards/departments, receives staffing events, publishes equipment failures |
+| AlertLevelServiceApp | [`alert-level-service/`](alert-level-service) | 7032 | Tracks the hospital Emergency Status (0-8) |
+| StaffingServiceApp | [`staffing-service/`](staffing-service) | 7033 | Computes on-call schedules from ward and emergency status |
+| EquipmentAlertServiceApp | [`equipment-alert-service/`](equipment-alert-service) | 7034 | Consumes and serves persistent equipment-failure alerts |
 
-Plus [`common/`](common) (no port) — the shared ActiveMQ broker and MQ config notes
-for `staffing-events-topic`: Staffing updates are broadcast as Events via the broker to decouple the frontend from the Staffing Service.
+The ActiveMQ broker and MQ configuration notes live in [`common/`](common).
 
-**Status:** scaffold only — build files, Javalin bootstrap, and TODOs are in place; no
-business logic has been implemented yet.
+## Architecture
 
-## Your task
+1. `ingestion-service` reads the classpath resource `wards-outdated.csv`, cleans and
+   deduplicates it, and exposes `GET /wards` plus an ingestion report.
+2. `ward-service` loads those records at startup, can refresh them on demand, and serves
+   ward/department lookups to `staffing-service`.
+3. `staffing-service` calls `ward-service` for the ward and `alert-level-service` for the
+   current status, computes a 12-hour on-call schedule, stores it, and publishes a
+   `SCHEDULE_UPDATED` event to `staffing-events-topic`.
+4. `ward-service` subscribes to that topic and exposes the latest event per ward, so the
+   frontend can react without polling the staffing service.
+5. `ward-service` publishes `EQUIPMENT_FAILURE` messages to the persistent
+   `equipment-failure-queue`; `equipment-alert-service` consumes, stores, and acknowledges
+   them so an alert survives a consumer restart once the broker has accepted it.
 
-Each stage below builds on the last — do them in order. Every service already builds
-and runs (`/health` returns `OK`); your job is to fill in the `TODO`s.
-
-1. **Ingestion** (required) — in `IngestionServiceApp`, read and clean
-   `wards-outdated.csv` (see [ingestion-service/README.md](ingestion-service/README.md)
-   for the known data issues and a worked example) and expose the cleaned records
-   over REST for `ward-service` to consume.
-2. **REST services** (required) — implement `ward-service`, `alert-level-service`,
-   and `staffing-service` per the [Integration contracts](#integration-contracts)
-   below: wards/departments lookup, Emergency Status tracking, and on-call
-   scheduling that calls the other two services synchronously over HTTP.
-3. **MQ decoupling** (stretch) — replace the synchronous call from `ward-service`
-   to `staffing-service` with the `staffing-events-topic` broadcast described in
-   [common/README.md](common/README.md), so staffing updates reach `ward-service`
-   asynchronously instead.
-4. **Alerting** (stretch) — have `ward-service` publish to the
-   `equipment-failure-queue` when it detects an equipment failure, and implement
-   `equipment-alert-service` as the guaranteed-delivery consumer (see
-   [equipment-alert-service/README.md](equipment-alert-service/README.md)).
-
-Stage 1-2 are the required core; stages 3-4 are where you can show judgment about
-when to reach for a queue/topic instead of a direct call. There's no fixed time
-limit, but budget your effort so you have a working stage 1-2 before spending time
-on 3-4 — a complete core beats a half-done everything.
-
-Automated tests aren't required, but are a good way to show your work — see each
-service's `## Test` section for how to add JUnit 5.
-
-## Integration contracts
-
-Endpoint shapes below are illustrative, not a fixed spec to match byte-for-byte —
-reasonable field names/status codes are fine as long as the calling service can
-consume them.
-
-| From | To | Call | Purpose |
-|---|---|---|---|
-| `ward-service` | `ingestion-service` | `GET /wards` → cleaned ward records | Populate its own ward/department list |
-| `staffing-service` | `ward-service` | `GET /wards/{id}` → `404` if unknown | Validate the ward before scheduling |
-| `staffing-service` | `alert-level-service` | `GET /alert-level` → `{ "level": 0-8 }` | Read current Emergency Status to size the on-call schedule |
-| `staffing-service` | `ward-service` (topic, stage 3) | publish to `staffing-events-topic` | Broadcast a schedule/status change |
-| `ward-service` (topic, stage 3) | — | subscribe to `staffing-events-topic` | React to staffing updates without polling |
-| `ward-service` (queue, stage 4) | `equipment-alert-service` | publish to `equipment-failure-queue` | Guarantee delivery of an equipment failure alert |
-
-## Project structure
-
-```
-healthsafe/
-├── README.md
-├── .gitignore
-├── ingestion-service/          (port 7030)
-│   ├── pom.xml
-│   ├── README.md
-│   └── src/main/
-│       ├── java/co/wethinkcode/healthsafe/IngestionServiceApp.java
-│       └── resources/wards-outdated.csv
-├── ward-service/          (port 7031)
-├── alert-level-service/          (port 7032)
-├── staffing-service/          (port 7033)
-├── common/
-│   ├── docker-compose.yml
-│   └── README.md
-└── equipment-alert-service/          (port 7034)
-```
+A topic is used for schedule broadcasts because every subscriber should see every event and
+loss during downtime is acceptable. A queue is used for equipment failures because each
+alert needs guaranteed, single-consumer delivery.
 
 ## Build
 
-Requirements: Java 17+, Maven 3.8+, Docker (for the broker in `common/`).
+Requirements: Java 17+, Maven 3.8+, and Docker for the broker.
 
-Every folder here (`ingestion-service/`, each domain service, and `equipment-alert-service/`) is
-an **independent** Maven project — there is no parent/aggregator pom. Build one at a
-time, e.g.:
+Build and test every module from the repository root:
+
+```
+./scripts/build-all.sh
+```
+
+Or build one module at a time:
 
 ```
 cd ward-service
 mvn package
 ```
 
-...or build every module in the repo in one pass from the project root:
-
-```
-find . -name pom.xml -execdir mvn -q package \;
-```
-
 ## Run
 
-```
-# ingestion
-cd ingestion-service && mvn package && java -jar target/ingestion-service.jar
+Start the broker first:
 
-# domain services, each in its own terminal
+```
+cd common
+docker compose up -d
+```
+
+Then start each service in its own terminal, in this order:
+
+```
 # terminal 1
-cd ward-service && mvn package && java -jar target/ward-service.jar
+cd ingestion-service && java -jar target/ingestion-service.jar
+
 # terminal 2
-cd alert-level-service && mvn package && java -jar target/alert-level-service.jar
+cd ward-service && java -jar target/ward-service.jar
+
 # terminal 3
-cd staffing-service && mvn package && java -jar target/staffing-service.jar
+cd alert-level-service && java -jar target/alert-level-service.jar
 
-# MQ broker (needed once the MQ-aware services above are wired up)
-cd common && docker compose up -d
+# terminal 4
+cd staffing-service && java -jar target/staffing-service.jar
 
-# alerting
-cd equipment-alert-service && mvn package && java -jar target/equipment-alert-service.jar
+# terminal 5
+cd equipment-alert-service && java -jar target/equipment-alert-service.jar
 ```
 
-| Service | Port |
-|---|---|
-| IngestionServiceApp (`ingestion-service`) | 7030 |
-| WardServiceApp (`ward-service`) | 7031 |
-| AlertLevelServiceApp (`alert-level-service`) | 7032 |
-| StaffingServiceApp (`staffing-service`) | 7033 |
-| EquipmentAlertServiceApp (`equipment-alert-service`) | 7034 |
+Environment overrides:
+
+| Variable | Default | Used by |
+|---|---|---|
+| `INGESTION_URL` | `http://localhost:7030` | ward-service |
+| `WARD_SERVICE_URL` | `http://localhost:7031` | staffing-service |
+| `ALERT_LEVEL_SERVICE_URL` | `http://localhost:7032` | staffing-service |
+| `HEALTHSAFE_BROKER_URL` | `tcp://localhost:61616` | ward, staffing, equipment-alert |
+
+## Integration contracts
+
+| From | To | Call | Purpose |
+|---|---|---|---|
+| ward-service | ingestion-service | `GET /wards` | Cleaned ward records |
+| staffing-service | ward-service | `GET /wards/{id}` | Validate a ward; `404` when unknown |
+| staffing-service | alert-level-service | `GET /alert-level` | Current `{ "level": 0-8 }` |
+| staffing-service | staffing-events-topic | `SCHEDULE_UPDATED` | Broadcast a schedule change |
+| ward-service | staffing-events-topic | subscribe | Keep the latest event per ward |
+| ward-service | equipment-failure-queue | `EQUIPMENT_FAILURE` | Publish a failure alert |
+| equipment-alert-service | equipment-failure-queue | subscribe | Store and acknowledge alerts |
+
+Key endpoints:
+
+| Method | Endpoint | Service |
+|---|---|---|
+| `GET` | `/wards` and `/ingestion-report` | ingestion |
+| `GET` | `/wards`, `/wards/{id}`, `/departments` | ward |
+| `POST` | `/wards/refresh` | ward |
+| `GET` | `/staffing-updates`, `/staffing-updates/{wardId}` | ward |
+| `POST` | `/wards/{id}/equipment-failures` | ward |
+| `GET` | `/alert-level` | alert-level |
+| `PUT`/`POST` | `/alert-level` with `{ "level": 0-8 }` | alert-level |
+| `GET` | `/staffing?wardId=W-01` | staffing |
+| `POST` | `/schedules` with `{ "wardId": "W-01" }` | staffing |
+| `GET` | `/schedules/{wardId}` | staffing |
+| `GET` | `/alerts`, `/alerts/{alertId}` | equipment-alert |
+
+Every service exposes `GET /health` returning `OK`.
+
+## Smoke test
+
+With the broker and all five services running:
+
+```
+curl http://localhost:7030/health
+curl http://localhost:7031/health
+curl http://localhost:7032/health
+curl http://localhost:7033/health
+curl http://localhost:7034/health
+
+curl http://localhost:7030/wards | jq '.[0]'
+curl http://localhost:7031/wards/W-01
+
+curl -X PUT http://localhost:7032/alert-level \
+  -H 'Content-Type: application/json' -d '{"level":5}'
+
+curl -X POST http://localhost:7033/schedules \
+  -H 'Content-Type: application/json' -d '{"wardId":"W-01"}'
+curl http://localhost:7033/schedules/W-01
+
+sleep 1
+curl http://localhost:7031/staffing-updates/W-01
+
+curl -X POST http://localhost:7031/wards/W-01/equipment-failures \
+  -H 'Content-Type: application/json' \
+  -d '{"equipmentId":"EQ-17","description":"Ventilator stopped","severity":"CRITICAL"}'
+
+sleep 1
+curl http://localhost:7034/alerts
+```
+
+The schedule response should contain `requiredDoctors` equal to
+`1 + emergencyLevel`, and the equipment alert should appear under `/alerts`.
+
+If the Docker Compose plugin is unavailable, the equivalent broker container is:
+
+```
+docker run -d --name healthsafe-activemq \
+  -p 61616:61616 -p 8161:8161 \
+  -v healthsafe-activemq-data:/opt/apache-activemq/data \
+  apache/activemq-classic:5.18.3
+```
+
+The web console is at http://localhost:8161 (default `admin`/`admin`).
 
 ## Test
 
-No automated tests exist yet (this is a scaffold). Each running service exposes
-`/health`, so sanity-check manually:
+Each module has JUnit 5 tests and the Surefire plugin. Run them individually:
 
 ```
-curl http://localhost:7030/health   # -> OK
+cd ingestion-service && mvn test
+cd alert-level-service && mvn test
+cd ward-service && mvn test
+cd staffing-service && mvn test
+cd equipment-alert-service && mvn test
 ```
 
-To add real tests to a module, add JUnit 5 and Surefire to its `pom.xml`:
-
-```xml
-<dependency>
-  <groupId>org.junit.jupiter</groupId>
-  <artifactId>junit-jupiter</artifactId>
-  <version>5.10.2</version>
-  <scope>test</scope>
-</dependency>
-```
-
-```xml
-<plugin>
-  <groupId>org.apache.maven.plugins</groupId>
-  <artifactId>maven-surefire-plugin</artifactId>
-  <version>3.2.5</version>
-</plugin>
-```
-
-then add tests under that module's `src/test/java/...` and run:
-
-```
-mvn test
-```
+The full build script runs `mvn clean package` for every module, which also runs its tests.

@@ -1,21 +1,19 @@
-# common — Asynchronous Decoupling (MQ)
+# common — ActiveMQ broker and MQ contracts
 
 ## Overview
 
-Topic: `staffing-events-topic`
+Part of the [HealthSafe](../README.md) project. This folder holds the shared ActiveMQ
+broker setup and the messaging contracts used by the services. It is not a service itself
+and has no application port.
 
-Staffing updates are broadcast as Events via the broker to decouple the frontend from the Staffing Service.
+- Topic: `staffing-events-topic` — non-persistent broadcast of `SCHEDULE_UPDATED`
+  events from `staffing-service` to every `ward-service` subscriber.
+- Queue: `equipment-failure-queue` — persistent, single-consumer delivery of
+  `EQUIPMENT_FAILURE` alerts from `ward-service` to `equipment-alert-service`.
 
-Part of the [HealthSafe](../README.md) project. Holds the ActiveMQ broker shared
-by the services below — not a service itself, so it has no port of its own.
-
-- Producer: `staffing-service` (`../staffing-service`)
-- Consumer(s): ward-service
-
-Broker URL and topic name are shared via a common `co.wethinkcode.healthsafe.mq.MqConfig` class
-(`BROKER_URL`, `TOPIC`). It's identical in every participating service's own source
-tree — each service here is an independent Maven project with no shared parent pom,
-so the common package is duplicated rather than imported from one place.
+The broker URL and destination names live in a duplicated
+`co.wethinkcode.healthsafe.mq.MqConfig` class inside each participating module. Each
+service is an independent Maven project, so the class is copied rather than imported.
 
 ## Project structure
 
@@ -25,15 +23,9 @@ common/
 └── README.md
 ```
 
-This folder holds the broker config and notes only — the actual publish/subscribe
-code belongs in the producer/consumer services listed above (their poms already
-depend on `activemq-client`, and each already has
-`src/main/java/co/wethinkcode/healthsafe/mq/MqConfig.java`).
-
 ## Build
 
-Nothing to build here directly — this folder just brings up the broker used by the
-services listed above.
+Nothing to build here. The services that use the broker are built from their own folders.
 
 ## Run
 
@@ -41,24 +33,34 @@ services listed above.
 docker compose up -d
 ```
 
-- Broker URL for clients: `tcp://localhost:61616`
-- Web console: http://localhost:8161 (default admin/admin)
+- Client broker URL: `tcp://localhost:61616`
+- Web console: http://localhost:8161 (default `admin`/`admin`)
 
-Then start the producer/consumer services as usual (`mvn package && java -jar ...`
-from their own directories at the project root).
+The named Docker volume `activemq-data` is mounted at
+`/opt/apache-activemq/data`, so queued messages and broker state survive container
+recreation.
+
+If the Compose plugin is not installed, use the equivalent:
+
+```
+docker run -d --name healthsafe-activemq \
+  -p 61616:61616 -p 8161:8161 \
+  -v healthsafe-activemq-data:/opt/apache-activemq/data \
+  apache/activemq-classic:5.18.3
+```
 
 ## Test
 
+Confirm the broker is running:
+
 ```
-docker compose ps          # confirm the broker container is healthy
+docker compose ps
 ```
 
-Once the TODOs below are implemented, verify end-to-end by publishing a message from
-`staffing-service` and confirming the consumer(s) receive it — e.g. via logs, or by
-watching the topic in the web console.
+Then use the [root smoke test](../README.md#smoke-test) to verify both paths:
 
-## TODO
+1. Create a schedule and confirm `ward-service` receives a staffing update from the topic.
+2. Report an equipment failure and confirm it appears in `equipment-alert-service`.
 
-- Add `activemq-client` publish logic to `staffing-service` on its stage/state-change endpoint.
-- Add `activemq-client` subscriber logic to consumer service(s) above, replacing any
-  direct synchronous calls to `staffing-service`.
+The equipment queue is persistent: an alert sent while the consumer is stopped should be
+delivered after `equipment-alert-service` starts again.

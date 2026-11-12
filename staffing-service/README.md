@@ -2,38 +2,66 @@
 
 ## Overview
 
-Provides on-call schedules for doctors based on ward and status.
+Computes on-call schedules from a ward and the current hospital Emergency Status. It calls
+`ward-service` and `alert-level-service` synchronously over HTTP, stores the latest schedule
+per ward, and publishes a `SCHEDULE_UPDATED` event to ActiveMQ. It is an independent Maven
+module and part of the [HealthSafe](../README.md) project.
 
-Part of the [HealthSafe](../README.md) project. Independent Maven module, no
-parent pom.
+## Endpoints
 
-MQ: this service publishes to the ActiveMQ topic `staffing-events-topic` — see [`../common/`](../common). Broker URL and topic name come from the common `co.wethinkcode.healthsafe.mq.MqConfig` class alongside it in this module.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check, returns `OK` |
+| `GET` | `/staffing?wardId=W-01` | Calculate a schedule without storing or publishing it |
+| `POST` | `/schedules` | Calculate, store, and publish a schedule; returns `201` |
+| `GET` | `/schedules/{wardId}` | Last stored schedule; `404` if none |
 
-REST: calls `ward-service` (`../ward-service`) to validate the ward and
-`alert-level-service` (`../alert-level-service`) to read the current Emergency
-Status before computing a schedule — see [Integration contracts](../README.md#integration-contracts)
-in the root README for the endpoint shapes.
+`POST /schedules` body:
 
-## Project structure
-
-```
-staffing-service/
-├── pom.xml
-└── src/main/java/co/wethinkcode/healthsafe/
-    ├── StaffingServiceApp.java
-    └── mq/
-        └── MqConfig.java
+```json
+{ "wardId": "W-01" }
 ```
 
-## Build
+A schedule contains `wardId`, `wing`, `department`, `emergencyLevel`, `requiredDoctors`,
+`doctors`, `onCallWindowHours`, and `generatedAt`.
+
+## Scheduling rule
+
+This is a deliberately small demo rule:
+
+```
+requiredDoctors = 1 + emergencyLevel
+doctors = DOC-001 .. DOC-N
+onCallWindowHours = 12
+```
+
+The stored schedule and topic event use the canonical ward ID.
+
+## Error mapping
+
+| Situation | Response |
+|---|---|
+| Missing/blank `wardId` | `400` |
+| Ward not found | `404` |
+| Invalid downstream payload or non-200 response | `502` |
+| Downstream service unavailable/timeout | `503` |
+
+A broker publish failure is logged but does not fail the schedule request; the synchronous
+calculation and storage have already succeeded. The topic is a non-persistent,
+fire-and-forget broadcast.
+
+## Configuration
+
+| Variable | Default |
+|---|---|
+| `WARD_SERVICE_URL` | `http://localhost:7031` |
+| `ALERT_LEVEL_SERVICE_URL` | `http://localhost:7032` |
+| `HEALTHSAFE_BROKER_URL` | `tcp://localhost:61616` |
+
+## Build and run
 
 ```
 mvn package
-```
-
-## Run
-
-```
 java -jar target/staffing-service.jar
 ```
 
@@ -41,11 +69,6 @@ Listens on port `7033`.
 
 ## Test
 
-No automated tests yet. Manually verify it's up:
-
 ```
-curl http://localhost:7033/health   # -> OK
+mvn test
 ```
-
-To add real tests, add JUnit 5 + the Surefire plugin to `pom.xml`, put tests under
-`src/test/java/co/wethinkcode/healthsafe/`, and run `mvn test`.

@@ -2,49 +2,62 @@
 
 ## Overview
 
-Uses a Queue to guarantee delivery of critical medical equipment failure alerts.
+Consumes critical medical equipment failure alerts from the persistent ActiveMQ
+`equipment-failure-queue` and serves the stored alerts over REST. It is an independent
+Maven module and the alerting service in the [HealthSafe](../README.md) project.
 
-Part of the [HealthSafe](../README.md) project — its alerting service.
-Independent Maven module, no parent pom.
+- Producer: [`ward-service`](../ward-service)
+- Consumer: this service
 
-Mechanism: ActiveMQ Queue (guaranteed delivery)
+A queue is used rather than a topic because each alert needs guaranteed,
+single-consumer delivery, including while this service is briefly down. This contrasts
+with the broadcast `staffing-events-topic` in [`../common/`](../common).
 
-Queue: `equipment-failure-queue`
+## Endpoints
 
-- Producer: `ward-service` (`../ward-service`) — publishes when it detects an
-  equipment failure on one of its wards.
-- Consumer: this service.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check, returns `OK` |
+| `GET` | `/alerts` | All stored alerts, ordered by report time |
+| `GET` | `/alerts/{alertId}` | One alert; `404` if unknown |
 
-Broker URL and queue name are shared via a common `co.wethinkcode.healthsafe.mq.MqConfig`
-class (`BROKER_URL`, `QUEUE`). It's identical in every participating service's own
-source tree — each service here is an independent Maven project with no shared
-parent pom, so the common package is duplicated rather than imported from one place.
+An alert has this shape:
 
-A queue (not a topic) is used deliberately: each failure alert must be delivered to
-exactly one consumer and processed at least once, even if this service is briefly
-down — unlike the broadcast `staffing-events-topic` in [`../common/`](../common),
-where every subscriber gets every message.
-
-## Project structure
-
+```json
+{
+  "alertId": "d1c4...",
+  "type": "EQUIPMENT_FAILURE",
+  "wardId": "W-01",
+  "equipmentId": "EQ-17",
+  "description": "Ventilator stopped",
+  "severity": "CRITICAL",
+  "reportedAt": "2026-01-01T00:00:00Z"
+}
 ```
-equipment-alert-service/
-├── pom.xml
-└── src/main/java/co/wethinkcode/healthsafe/
-    ├── EquipmentAlertServiceApp.java
-    └── mq/
-        └── MqConfig.java
-```
 
-## Build
+## Delivery guarantees
+
+- The consumer uses `CLIENT_ACKNOWLEDGE`.
+- It stores the alert before acknowledging the JMS message.
+- On a storage failure it logs the error and calls `session.recover()` so the broker
+  redelivers the message.
+- Alerts are deduplicated by `alertId`, making redelivery idempotent.
+- Messages are persistent, so they survive a broker restart when the broker data volume is
+  retained.
+
+State is in memory; the service does not re-read broker history after a restart. Once a
+message has been acknowledged, it exists only in this process's alert store.
+
+## Configuration
+
+| Variable | Default |
+|---|---|
+| `HEALTHSAFE_BROKER_URL` | `tcp://localhost:61616` |
+
+## Build and run
 
 ```
 mvn package
-```
-
-## Run
-
-```
 java -jar target/equipment-alert-service.jar
 ```
 
@@ -52,11 +65,9 @@ Listens on port `7034`.
 
 ## Test
 
-No automated tests yet. Manually verify it's up:
-
 ```
-curl http://localhost:7034/health   # -> OK
+mvn test
 ```
 
-To add real tests, add JUnit 5 + the Surefire plugin to `pom.xml`, put tests under
-`src/test/java/co/wethinkcode/healthsafe/`, and run `mvn test`.
+The tests use an embedded ActiveMQ broker and cover storage, consumption, session recovery,
+idempotency, and the REST endpoints.

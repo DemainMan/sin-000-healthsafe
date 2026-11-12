@@ -2,35 +2,60 @@
 
 ## Overview
 
-Provides lists of wards and departments.
+Serves ward and department data sourced from `ingestion-service`, receives staffing
+updates from the ActiveMQ topic, and publishes equipment failures to the ActiveMQ queue.
+It is an independent Maven module with no parent pom.
 
-Part of the [HealthSafe](../README.md) project. Independent Maven module, no
-parent pom.
+Part of the [HealthSafe](../README.md) project. MQ names and the broker URL come from the
+duplicated `co.wethinkcode.healthsafe.mq.MqConfig` class in this module.
 
-MQ: this service subscribes to the ActiveMQ topic `staffing-events-topic` — see [`../common/`](../common) — and publishes to the ActiveMQ queue `equipment-failure-queue` when it detects an equipment failure on one of its wards, consumed by [`../equipment-alert-service`](../equipment-alert-service). Broker URL, topic name, and queue name come from the common `co.wethinkcode.healthsafe.mq.MqConfig` class alongside it in this module.
+## Endpoints
 
-REST: called by `staffing-service` (`../staffing-service`) and `alert-level-service` (`../alert-level-service`) — see [Integration contracts](../README.md#integration-contracts) in the root README for the endpoint shapes.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check, returns `OK` |
+| `GET` | `/wards` | All cleaned wards |
+| `GET` | `/wards/{id}` | One ward; `404` if unknown |
+| `GET` | `/departments` | Distinct departments |
+| `POST` | `/wards/refresh` | Reload wards from ingestion; `503` if ingestion is unavailable |
+| `GET` | `/staffing-updates` | Latest staffing event per ward |
+| `GET` | `/staffing-updates/{wardId}` | Latest event for one ward; `404` if none |
+| `POST` | `/wards/{id}/equipment-failures` | Publish an equipment failure; `202` on success |
 
-## Project structure
+Equipment failure request:
 
+```json
+{
+  "equipmentId": "EQ-17",
+  "description": "Ventilator stopped",
+  "severity": "CRITICAL"
+}
 ```
-ward-service/
-├── pom.xml
-└── src/main/java/co/wethinkcode/healthsafe/
-    ├── WardServiceApp.java
-    └── mq/
-        └── MqConfig.java
-```
 
-## Build
+`equipmentId` is required. `severity` defaults to `CRITICAL`; `description` may be
+omitted. Unknown wards return `404`, a missing equipment ID returns `400`, and a broker
+failure returns `503`. On success, the response contains the generated `alertId`, `type`,
+canonical `wardId`, and `reportedAt` alongside the request fields.
+
+## MQ behavior
+
+- Subscribes to `staffing-events-topic` and stores the latest `SCHEDULE_UPDATED` event per
+  canonical ward ID.
+- Publishes `EQUIPMENT_FAILURE` messages to `equipment-failure-queue` with persistent
+  delivery. Publishing is intentionally not retried here; a broker failure is surfaced as
+  `503`.
+
+## Configuration
+
+| Variable | Default |
+|---|---|
+| `INGESTION_URL` | `http://localhost:7030` |
+| `HEALTHSAFE_BROKER_URL` | `tcp://localhost:61616` |
+
+## Build and run
 
 ```
 mvn package
-```
-
-## Run
-
-```
 java -jar target/ward-service.jar
 ```
 
@@ -38,11 +63,6 @@ Listens on port `7031`.
 
 ## Test
 
-No automated tests yet. Manually verify it's up:
-
 ```
-curl http://localhost:7031/health   # -> OK
+mvn test
 ```
-
-To add real tests, add JUnit 5 + the Surefire plugin to `pom.xml`, put tests under
-`src/test/java/co/wethinkcode/healthsafe/`, and run `mvn test`.
