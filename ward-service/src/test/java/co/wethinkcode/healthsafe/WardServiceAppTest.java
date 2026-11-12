@@ -14,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,6 +25,7 @@ class WardServiceAppTest {
     private Javalin app;
     private HttpClient client;
     private StaffingUpdateStore updateStore;
+    private final AtomicReference<EquipmentFailureMessage> published = new AtomicReference<>();
 
     @BeforeEach
     void start() throws Exception {
@@ -47,7 +49,7 @@ class WardServiceAppTest {
         WardStore store = new WardStore();
         store.replaceAll(ingestionClient.fetchWards());
         updateStore = new StaffingUpdateStore();
-        app = WardServiceApp.createApp(store, ingestionClient, updateStore).start(0);
+        app = WardServiceApp.createApp(store, ingestionClient, updateStore, published::set).start(0);
         client = HttpClient.newHttpClient();
     }
 
@@ -103,6 +105,22 @@ class WardServiceAppTest {
     }
 
     @Test
+    void publishesEquipmentFailuresForKnownWards() throws Exception {
+        HttpResponse<String> response = sendJson("POST", "/wards/W-01/equipment-failures",
+                "{\"equipmentId\":\"EQ-17\",\"description\":\"Ventilator stopped\"}");
+
+        assertEquals(202, response.statusCode());
+        assertEquals("W-01", published.get().wardId());
+        assertEquals("EQ-17", published.get().equipmentId());
+        assertEquals("CRITICAL", published.get().severity());
+        assertTrue(response.body().contains("\"alertId\":\"" + published.get().alertId() + "\""));
+
+        assertEquals(404, sendJson("POST", "/wards/W-99/equipment-failures",
+                "{\"equipmentId\":\"EQ-17\"}").statusCode());
+        assertEquals(400, sendJson("POST", "/wards/W-01/equipment-failures", "{}").statusCode());
+    }
+
+    @Test
     void returns503WhenIngestionFailsDuringRefresh() throws Exception {
         ingestion.stop(0);
         HttpResponse<String> response = sendPost("/wards/refresh");
@@ -121,9 +139,14 @@ class WardServiceAppTest {
     }
 
     private HttpResponse<String> sendPost(String path) throws Exception {
+        return sendJson("POST", path, "");
+    }
+
+    private HttpResponse<String> sendJson(String method, String path, String body) throws Exception {
         return client.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
-                        .POST(HttpRequest.BodyPublishers.noBody())
+                        .header("Content-Type", "application/json")
+                        .method(method, HttpRequest.BodyPublishers.ofString(body))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
     }
